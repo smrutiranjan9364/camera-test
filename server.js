@@ -202,7 +202,7 @@ app.get('/broadcast', (req, res) => {
             <video id="preview" autoplay muted playsinline></video>
             
             <div style="margin-top: 20px;">
-                <button id="startBtn" onclick="startBroadcast()">Start Broadcast</button>
+                <button id="startBtn" onclick="startBroadcast()">Restart Broadcast</button>
                 <button id="stopBtn" onclick="stopBroadcast()" disabled>Stop Broadcast</button>
             </div>
             
@@ -307,6 +307,10 @@ app.get('/broadcast', (req, res) => {
                     document.getElementById('status').textContent = 'Disconnected';
                 }
                 
+                // Auto-start broadcasting as soon as the page loads
+                // (the browser still shows its camera-permission prompt once)
+                window.addEventListener('load', startBroadcast);
+
                 // Cleanup on page unload
                 window.onbeforeunload = stopBroadcast;
             </script>

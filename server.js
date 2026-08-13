@@ -126,6 +126,28 @@ function notifyViewersCameraClosed(cameraId) {
 
 // Routes
 
+// Landing page
+app.get('/', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Camera Test</title>
+            <style>
+                body { font-family: Arial; max-width: 600px; margin: 60px auto; padding: 20px; text-align: center; }
+                a.btn { display: inline-block; margin: 10px; padding: 14px 28px; background: #007bff; color: #fff; text-decoration: none; border-radius: 6px; }
+            </style>
+        </head>
+        <body>
+            <h1>Camera Test</h1>
+            <p>Choose an option:</p>
+            <a class="btn" href="/broadcast">Broadcast Camera</a>
+            <a class="btn" href="/view">View Cameras</a>
+        </body>
+        </html>
+    `);
+});
+
 // Legitimate camera streaming interface (not deceptive)
 app.get('/broadcast', (req, res) => {
     res.send(`

@@ -23,7 +23,7 @@ const authenticate = (req, res, next) => {
 };
 
 // Camera WebSocket endpoint
-const cameraWss = new WebSocket.Server({ server, path: '/ws/camera' });
+const cameraWss = new WebSocket.Server({ noServer: true });
 
 cameraWss.on('connection', (ws, req) => {
     // Extract authentication from query params
@@ -59,7 +59,25 @@ cameraWss.on('connection', (ws, req) => {
 });
 
 // Viewer WebSocket endpoint
-const viewerWss = new WebSocket.Server({ server, path: '/ws/viewer' });
+const viewerWss = new WebSocket.Server({ noServer: true });
+
+// Single upgrade handler routes by path (attaching two path-based
+// WebSocket.Servers to one HTTP server does not work with the ws library)
+server.on('upgrade', (req, socket, head) => {
+    const { pathname } = new URL(req.url, 'http://localhost');
+
+    if (pathname === '/ws/camera') {
+        cameraWss.handleUpgrade(req, socket, head, (ws) => {
+            cameraWss.emit('connection', ws, req);
+        });
+    } else if (pathname === '/ws/viewer') {
+        viewerWss.handleUpgrade(req, socket, head, (ws) => {
+            viewerWss.emit('connection', ws, req);
+        });
+    } else {
+        socket.destroy();
+    }
+});
 
 viewerWss.on('connection', (ws, req) => {
     const url = new URL(req.url, 'http://localhost');

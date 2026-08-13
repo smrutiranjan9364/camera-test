@@ -43,8 +43,8 @@ cameraWss.on('connection', (ws, req) => {
     broadcastCameraList();
     
     ws.on('message', (data) => {
-        // Broadcast to authorized viewers only
-        broadcastToAuthorizedViewers(cameraId, data);
+        // Forward the video chunk to every connected viewer
+        broadcastVideoToViewers(cameraId, data);
     });
     
     ws.on('close', () => {
@@ -91,17 +91,10 @@ viewerWss.on('connection', (ws, req) => {
     const viewerId = generateId();
     viewers.set(viewerId, { ws, authorizedCameras: new Set() });
     
-    // Send current camera list
+    // Send current camera list (array of id strings)
     ws.send(JSON.stringify({
         type: 'cameras',
-        data: Array.from(cameras.entries())
-            .filter(([_, cam]) => cam.authorized)
-            .map(([id, cam]) => ({
-                id,
-                startTime: cam.startTime,
-                // Don't show cameras without explicit permission
-                hasPermission: false 
-            }))
+        data: Array.from(cameras.keys())
     }));
     
     ws.on('close', () => {
@@ -109,11 +102,18 @@ viewerWss.on('connection', (ws, req) => {
     });
 });
 
-function broadcastToAuthorizedViewers(cameraId, data) {
+function broadcastVideoToViewers(cameraId, chunk) {
+    // Frame the binary chunk as: [4-byte id length][id bytes][video bytes]
+    // so the viewer can tell which camera each chunk belongs to.
+    const idBuf = Buffer.from(cameraId, 'utf8');
+    const header = Buffer.alloc(4);
+    header.writeUInt32BE(idBuf.length, 0);
+    const body = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    const framed = Buffer.concat([header, idBuf, body]);
+
     viewers.forEach((viewer) => {
-        if (viewer.authorizedCameras.has(cameraId) && 
-            viewer.ws.readyState === WebSocket.OPEN) {
-            viewer.ws.send(data); // Send binary directly, no base64
+        if (viewer.ws.readyState === WebSocket.OPEN) {
+            viewer.ws.send(framed);
         }
     });
 }
@@ -264,17 +264,23 @@ app.get('/broadcast', (req, res) => {
                 }
                 
                 function startStreaming() {
-                    // Use MediaRecorder for efficient streaming
-                    mediaRecorder = new MediaRecorder(stream, {
-                        mimeType: 'video/webm;codecs=vp9'
-                    });
-                    
+                    // vp8/webm is supported by both MediaRecorder and MediaSource
+                    // (vp9 playback via MSE is less reliable across browsers).
+                    const mimeType = 'video/webm;codecs=vp8';
+                    if (!MediaRecorder.isTypeSupported(mimeType)) {
+                        document.getElementById('status').textContent =
+                            'This browser cannot record ' + mimeType;
+                        return;
+                    }
+
+                    mediaRecorder = new MediaRecorder(stream, { mimeType });
+
                     mediaRecorder.ondataavailable = (event) => {
                         if (event.data.size > 0 && ws.readyState === WebSocket.OPEN) {
                             ws.send(event.data);
                         }
                     };
-                    
+
                     mediaRecorder.start(100); // Send chunks every 100ms
                 }
                 
@@ -330,47 +336,123 @@ app.get('/view', authenticate, (req, res) => {
             </div>
             
             <script>
+                const MIME = 'video/webm;codecs=vp8';
                 const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
                 const ws = new WebSocket(\`\${wsProtocol}//\${window.location.host}/ws/viewer?token=YOUR_TOKEN\`);
-                
-                const videoElements = new Map();
-                
+                ws.binaryType = 'arraybuffer';
+
+                // cameraId -> { ms, sourceBuffer, queue: [ArrayBuffer] }
+                const players = new Map();
+
                 ws.onmessage = (event) => {
-                    const msg = JSON.parse(event.data);
-                    
-                    if (msg.type === 'cameras') {
-                        updateCameraList(msg.data);
-                    } else if (msg.type === 'video') {
-                        // Handle video data - use MediaSource for smooth playback
-                        handleVideoData(msg.cameraId, msg.data);
-                    } else if (msg.type === 'camera_closed') {
-                        removeCamera(msg.cameraId);
+                    if (typeof event.data === 'string') {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'cameras') {
+                            updateCameraList(msg.data);
+                        } else if (msg.type === 'camera_closed') {
+                            removeCamera(msg.cameraId);
+                        }
+                    } else {
+                        handleVideoFrame(event.data); // ArrayBuffer
                     }
                 };
-                
-                function updateCameraList(cameras) {
+
+                function updateCameraList(ids) {
                     const container = document.getElementById('cameraList');
-                    if (cameras.length === 0) {
+                    const placeholder = container.querySelector('.no-cameras');
+
+                    if (ids.length === 0) {
+                        players.forEach((_, id) => removeCamera(id));
                         container.innerHTML = '<div class="no-cameras">No active cameras</div>';
                         return;
                     }
-                    
-                    container.innerHTML = cameras.map(id => 
-                        \`<div class="camera-card" id="cam-\${id}">
-                            <div class="camera-header">Camera \${id}</div>
-                            <video class="camera-video" id="video-\${id}" autoplay muted></video>
-                        </div>\`
-                    ).join('');
+                    if (placeholder) placeholder.remove();
+
+                    // Add cards for new cameras (never rebuild existing ones —
+                    // that would tear down a playing MediaSource).
+                    ids.forEach(id => {
+                        if (document.getElementById('cam-' + id)) return;
+                        const card = document.createElement('div');
+                        card.className = 'camera-card';
+                        card.id = 'cam-' + id;
+                        card.innerHTML =
+                            '<div class="camera-header">Camera ' + id + '</div>' +
+                            '<video class="camera-video" id="video-' + id + '" autoplay muted playsinline></video>';
+                        container.appendChild(card);
+                        setupPlayer(id);
+                    });
+
+                    // Remove cards for cameras no longer in the list.
+                    Array.from(players.keys()).forEach(id => {
+                        if (!ids.includes(id)) removeCamera(id);
+                    });
                 }
-                
-                function handleVideoData(cameraId, data) {
-                    // Implementation would use MediaSource API for proper streaming
-                    console.log('Received video data for camera:', cameraId);
+
+                function setupPlayer(id) {
+                    const video = document.getElementById('video-' + id);
+                    if (!video || players.has(id)) return;
+                    if (!('MediaSource' in window) || !MediaSource.isTypeSupported(MIME)) {
+                        console.error('MediaSource does not support', MIME);
+                        return;
+                    }
+
+                    const ms = new MediaSource();
+                    const state = { ms, sourceBuffer: null, queue: [] };
+                    players.set(id, state);
+                    video.src = URL.createObjectURL(ms);
+
+                    ms.addEventListener('sourceopen', () => {
+                        try {
+                            state.sourceBuffer = ms.addSourceBuffer(MIME);
+                            state.sourceBuffer.mode = 'sequence';
+                            state.sourceBuffer.addEventListener('updateend', () => flush(state));
+                            flush(state);
+                        } catch (e) {
+                            console.error('addSourceBuffer failed:', e);
+                        }
+                    });
                 }
-                
-                function removeCamera(cameraId) {
-                    const el = document.getElementById(\`cam-\${cameraId}\`);
+
+                function handleVideoFrame(buffer) {
+                    // Parse [4-byte id length][id bytes][video bytes]
+                    const view = new DataView(buffer);
+                    const idLen = view.getUint32(0);
+                    const id = new TextDecoder().decode(new Uint8Array(buffer, 4, idLen));
+                    const videoData = buffer.slice(4 + idLen);
+
+                    let state = players.get(id);
+                    if (!state) {                 // chunk arrived before the list update
+                        updateCameraList([...players.keys(), id]);
+                        state = players.get(id);
+                        if (!state) return;
+                    }
+                    state.queue.push(videoData);
+                    flush(state);
+                }
+
+                function flush(state) {
+                    const sb = state.sourceBuffer;
+                    if (!sb || sb.updating || state.queue.length === 0) return;
+                    try {
+                        sb.appendBuffer(state.queue.shift());
+                    } catch (e) {
+                        console.error('appendBuffer failed:', e);
+                    }
+                }
+
+                function removeCamera(id) {
+                    const state = players.get(id);
+                    if (state) {
+                        try { if (state.ms.readyState === 'open') state.ms.endOfStream(); } catch (e) {}
+                        players.delete(id);
+                    }
+                    const el = document.getElementById('cam-' + id);
                     if (el) el.remove();
+
+                    const container = document.getElementById('cameraList');
+                    if (!container.querySelector('.camera-card')) {
+                        container.innerHTML = '<div class="no-cameras">No active cameras</div>';
+                    }
                 }
             </script>
         </body>

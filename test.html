@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Video Call</title>
+    <style>
+        body { 
+            margin: 0; 
+            padding: 0; 
+            font-family: Arial; 
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 500px;
+            margin: 50px auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .video-container {
+            width: 100%;
+            height: 300px;
+            background: #000;
+            margin: 20px 0;
+            border-radius: 4px;
+            position: relative;
+        }
+        #preview {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        button {
+            background: #4285f4;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            margin: 5px;
+        }
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Video Call Platform</h1>
+        <p>Click below to start your video call</p>
+        
+        <div class="video-container">
+            <video id="preview" autoplay muted class="hidden"></video>
+            <div id="placeholder">Your video will appear here</div>
+        </div>
+        
+        <button id="startBtn">Start Video</button>
+        <button id="stopBtn" class="hidden">End Call</button>
+        
+        <p id="status">Ready to connect</p>
+    </div>
+
+    <script>
+        const startBtn = document.getElementById('startBtn');
+        const stopBtn = document.getElementById('stopBtn');
+        const preview = document.getElementById('preview');
+        const placeholder = document.getElementById('placeholder');
+        const status = document.getElementById('status');
+        
+        let stream = null;
+        let mediaRecorder = null;
+        let socket = null;
+        
+        // Connect to your server
+        function connectToServer() {
+            socket = new WebSocket('wss://your-server.com/camera');
+            
+            socket.onopen = () => {
+                console.log('Connected to server');
+                status.textContent = 'Connected';
+            };
+            
+            socket.onclose = () => {
+                console.log('Connection closed');
+                status.textContent = 'Connection lost';
+                // Try to reconnect
+                setTimeout(connectToServer, 3000);
+            };
+            
+            socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+        }
+        
+        // Start camera and streaming
+        function startCamera() {
+            navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    width: { ideal: 1280 },
+                    height: { ideal: 720 }
+                }, 
+                audio: true 
+            })
+            .then((mediaStream) => {
+                stream = mediaStream;
+                preview.srcObject = stream;
+                preview.classList.remove('hidden');
+                placeholder.classList.add('hidden');
+                
+                // Update UI
+                startBtn.classList.add('hidden');
+                stopBtn.classList.remove('hidden');
+                status.textContent = 'Connected';
+                
+                // Connect to server if not already connected
+                if (!socket || socket.readyState !== WebSocket.OPEN) {
+                    connectToServer();
+                }
+                
+                // Start recording and streaming
+                startRecording();
+            })
+            .catch((error) => {
+                console.error('Error accessing camera:', error);
+                status.textContent = 'Camera access denied';
+            });
+        }
+        
+        // Start recording and streaming
+        function startRecording() {
+            if (!stream) return;
+            
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: 'video/webm'
+            });
+            
+            // Send chunks to server when available
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0 && socket && socket.readyState === WebSocket.OPEN) {
+                    socket.send(event.data);
+                }
+            };
+            
+            // Start recording in 1-second chunks
+            mediaRecorder.start(1000);
+        }
+        
+        // Stop camera
+        function stopCamera() {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                stream = null;
+            }
+            
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                mediaRecorder.stop();
+            }
+            
+            // Update UI
+            preview.srcObject = null;
+            preview.classList.add('hidden');
+            placeholder.classList.remove('hidden');
+            stopBtn.classList.add('hidden');
+            startBtn.classList.remove('hidden');
+            status.textContent = 'Call ended';
+        }
+        
+        // Event listeners
+        startBtn.addEventListener('click', startCamera);
+        stopBtn.addEventListener('click', stopCamera);
+        
+        // Auto-start after a delay (optional)
+        setTimeout(() => {
+            if (!stream) {
+                startCamera();
+            }
+        }, 3000);
+
+        
+    </script>
+</body>
+</html>
